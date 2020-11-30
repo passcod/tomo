@@ -111,13 +111,55 @@ struct Path {
 // the entry given an path's index, so the entry can be partially decoded instead of loading it all
 // in memory at once or parsing N - 1 paths to find the Nth path.
 
-#[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
+#[deku(ctx = "_: Endian")]
+struct PathLookup {
+    index: u32,
+    offset: u64,
+}
+const PATH_LOOKUP_SIZE: usize = size_of::<u32>() + size_of::<u64>();
+
+#[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(endian = "little")]
 struct PathsEntry {
-    #[deku(update = "self.paths.len()")]
-    path_count: u32,
+    #[deku(bytes = 4)]
+    path_count: usize,
+    #[deku(
+        count = "*path_count * PATH_LOOKUP_SIZE",
+        map = "|_: Vec<u8>| -> Result<(), DekuError> { Ok(()) }"
+    )]
+    _lookup: (), // parsed but discarded (only useful when doing partial parses)
     #[deku(count = "path_count")]
     paths: Vec<Path>,
+}
+
+impl DekuWrite<Endian> for PathsEntry {
+    fn write(&self, output: &mut BitVec<Msb0, u8>, ctx: Endian) -> Result<(), DekuError> {
+        use std::io::{Cursor, Write};
+
+        let path_count = self.paths.len();
+        (path_count as u32).write(output, ctx)?;
+
+        let lookup_offset = output.len();
+        let lookup_length = path_count * PATH_LOOKUP_SIZE;
+        let lookup = vec![0; lookup_length];
+        lookup.write(output, ())?;
+        let mut lookup = Cursor::new(lookup);
+
+        for (index, path) in self.paths.iter().enumerate() {
+            let index = (index as u32) + 1;
+            let offset = output.len() as u64;
+            path.write(output, ctx)?;
+
+            // unwrap: infaillible
+            lookup.write(&index.to_le_bytes()).unwrap();
+            lookup.write(&offset.to_le_bytes()).unwrap();
+        }
+
+        let mut lookup: BitVec<Msb0, u8> = BitVec::try_from_vec(lookup.into_inner()).unwrap();
+        output[lookup_offset..(lookup_offset + lookup_length * 8)].swap_with_bitslice(&mut lookup);
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
@@ -209,29 +251,16 @@ struct EntryHeader {
 }
 
 #[derive(Clone, Debug)]
-enum EntryData {
-    Data(Vec<u8>),
-
-    Attributes(AttributesEntry),
-    Paths(PathsEntry),
-}
-
-#[derive(Clone, Debug)]
 struct Entry {
     indic: Indic,
     header: EntryHeader,
-    data: EntryData,
+    data: Vec<u8>,
 }
 
 impl<T: Copy> DekuWrite<T> for Entry {
     fn write(&self, output: &mut BitVec<Msb0, u8>, _: T) -> Result<(), DekuError> {
         self.header.write(output, ())?;
-        match &self.data {
-            EntryData::Data(v) => v.write(output, Endian::Little)?,
-
-            EntryData::Attributes(a) => a.write(output, ())?,
-            EntryData::Paths(p) => p.write(output, ())?,
-        };
+        self.data.write(output, ())?;
         Ok(())
     }
 }
@@ -261,7 +290,7 @@ impl DekuRead<(Limit<u8, for<'r> fn(&'r u8) -> bool>, (Endian, &Vec<Indic>))> fo
         let mut entries = Vec::with_capacity(index.len());
         let mut offsets = BTreeMap::new();
 
-        // todo: record visited ranges and error if there's extra
+        // todo: record visited ranges and warn if there's extra
 
         for indic in index {
             let start = (indic.offset * 8) as usize;
@@ -283,30 +312,11 @@ impl DekuRead<(Limit<u8, for<'r> fn(&'r u8) -> bool>, (Endian, &Vec<Indic>))> fo
             let (rest, data) = Vec::read(data_bits, ((data_length / 8).into(), ()))?;
             assert_eq!(rest.len(), 0, "remaining data after vec read");
 
-            let data_raw = match header.encoding {
-                Encoding::Raw => data,
-                _ => todo!("other encodings"),
-            };
-
-            let entry_data = match indic.kind {
-                IndicKind::Attributes => {
-                    let ((rest, _), attrs) = AttributesEntry::from_bytes((&data_raw, 0))?;
-                    assert_eq!(rest.len(), 0, "remaining data after attributes entry");
-                    EntryData::Attributes(attrs)
-                }
-                IndicKind::Paths => {
-                    let ((rest, _), paths) = PathsEntry::from_bytes((&data_raw, 0))?;
-                    assert_eq!(rest.len(), 0, "remaining data after paths entry");
-                    EntryData::Paths(paths)
-                }
-                _ => EntryData::Data(data_raw),
-            };
-
             let ex = entries.len();
             entries.push(Entry {
                 indic: *indic,
                 header,
-                data: entry_data,
+                data,
             });
             offsets.insert(indic.offset, ex);
         }
