@@ -294,6 +294,11 @@ impl Entries {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    pub fn from_offset(&self, offset: u64) -> Option<&Entry> {
+        let index = *self.offsets.get(&offset)?;
+        self.entries.get(index)
+    }
 }
 
 impl DekuRead<(Limit<u8, for<'r> fn(&'r u8) -> bool>, (Endian, &Vec<Indic>))> for Entries {
@@ -406,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn single_file_raw() {
+    fn single_file_raw_lowlevel() {
         let mut ctnr = Vec::new();
         ctnr.extend(&MAGIC);
         ctnr.extend(vec![Mode::Stacked as u8]);
@@ -423,6 +428,8 @@ mod tests {
             data.push(0b00_000000); // header: flags
             data.push(0x00); // header: encoding(raw)
             data.extend(&1_u32.to_le_bytes()); // count
+            data.extend(&1_u32.to_le_bytes()); // index
+            data.extend(&0_u64.to_le_bytes()); // offset
             data.extend(pathdata);
             data
         };
@@ -436,6 +443,8 @@ mod tests {
             data.push(0b00_000000); // header: flags
             data.push(0x00); // header: encoding(raw)
             data.extend(&1_u32.to_le_bytes()); // count
+            data.extend(&1_u32.to_le_bytes()); // index
+            data.extend(&0_u64.to_le_bytes()); // offset
             data.extend(attr);
             data
         };
@@ -443,11 +452,9 @@ mod tests {
         let fileoffset = attrsoffset + attrsdata.len();
         let filedata = {
             let file = b"Hello world!";
-            let fileheader = vec![0b00_000000, 0x00];
             let mut data = Vec::new();
             data.push(0b00_000000); // header: flags
             data.push(0x00); // header: encoding(raw)
-            data.extend(fileheader);
             data.extend(file);
             data
         };
@@ -505,8 +512,6 @@ mod tests {
         ctnr.extend(&(data.len() as u64).to_le_bytes());
         ctnr.extend(index);
         ctnr.extend(data);
-
-        assert_eq!(ctnr.len(), 137);
         dbg!(&ctnr);
 
         let ((rest, _), value) = Container::from_bytes((&ctnr, 0)).unwrap();
@@ -516,6 +521,26 @@ mod tests {
         assert_eq!(value.entries.len(), 3);
         assert_eq!(value.index.len(), 3);
 
-        // todo: read from high level api
+        let paths_indic = value.index.iter().find(|indic| indic.kind == IndicKind::Paths).unwrap();
+        let paths_entry = value.entries.from_offset(paths_indic.offset).unwrap();
+        assert_eq!(paths_entry.header.encoding, Encoding::Raw);
+        let ((rest, _), pathsv) = PathsEntry::from_bytes((&paths_entry.data, 0)).unwrap();
+        assert_eq!(rest.len(), 0, "remaining data on paths entry");
+        assert_eq!(pathsv.paths, vec![Path {
+            segcount: 1,
+            segments: vec![PathSeg::Segment(b"hello\0".to_vec())],
+        }]);
+
+        let attrs_indic = value.index.iter().find(|indic| indic.kind == IndicKind::Attributes).unwrap();
+        let attrs_entry = value.entries.from_offset(attrs_indic.offset).unwrap();
+        assert_eq!(attrs_entry.header.encoding, Encoding::Raw);
+        let ((rest, _), attrsv) = AttributesEntry::from_bytes((&attrs_entry.data, 0)).unwrap();
+        assert_eq!(rest.len(), 0, "remaining data on attrs entry");
+        assert_eq!(attrsv.attrs, vec![Attributes { mode: 0o644 }]);
+
+        let file_indic = value.index.iter().find(|indic| indic.kind == IndicKind::File).unwrap();
+        let file_entry = value.entries.from_offset(file_indic.offset).unwrap();
+        assert_eq!(file_entry.header.encoding, Encoding::Raw);
+        assert_eq!(file_entry.data, b"Hello world!".to_vec());
     }
 }
