@@ -113,11 +113,42 @@ struct Path {
 
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(ctx = "_: Endian")]
-struct PathLookup {
+struct Lookup {
     index: u32,
     offset: u64,
 }
-const PATH_LOOKUP_SIZE: usize = size_of::<u32>() + size_of::<u64>();
+const LOOKUP_SIZE: usize = size_of::<u32>() + size_of::<u64>();
+
+fn write_lookup<T: DekuWrite<Endian>>(
+    list: &Vec<T>,
+    output: &mut BitVec<Msb0, u8>,
+    ctx: Endian,
+) -> Result<(), DekuError> {
+    use std::io::{Cursor, Write};
+
+    let path_count = list.len();
+    (path_count as u32).write(output, ctx)?;
+
+    let lookup_offset = output.len();
+    let lookup_length = path_count * LOOKUP_SIZE;
+    let lookup = vec![0; lookup_length];
+    lookup.write(output, ())?;
+    let mut lookup = Cursor::new(lookup);
+
+    for (index, item) in list.iter().enumerate() {
+        let index = (index as u32) + 1;
+        let offset = output.len() as u64;
+        item.write(output, ctx)?;
+
+        // unwrap: infaillible
+        lookup.write(&index.to_le_bytes()).unwrap();
+        lookup.write(&offset.to_le_bytes()).unwrap();
+    }
+
+    let mut lookup: BitVec<Msb0, u8> = BitVec::try_from_vec(lookup.into_inner()).unwrap();
+    output[lookup_offset..(lookup_offset + lookup_length * 8)].swap_with_bitslice(&mut lookup);
+    Ok(())
+}
 
 #[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(endian = "little")]
@@ -125,7 +156,7 @@ struct PathsEntry {
     #[deku(bytes = 4)]
     path_count: usize,
     #[deku(
-        count = "*path_count * PATH_LOOKUP_SIZE",
+        count = "*path_count * LOOKUP_SIZE",
         map = "|_: Vec<u8>| -> Result<(), DekuError> { Ok(()) }"
     )]
     _lookup: (), // parsed but discarded (only useful when doing partial parses)
@@ -135,30 +166,7 @@ struct PathsEntry {
 
 impl DekuWrite<Endian> for PathsEntry {
     fn write(&self, output: &mut BitVec<Msb0, u8>, ctx: Endian) -> Result<(), DekuError> {
-        use std::io::{Cursor, Write};
-
-        let path_count = self.paths.len();
-        (path_count as u32).write(output, ctx)?;
-
-        let lookup_offset = output.len();
-        let lookup_length = path_count * PATH_LOOKUP_SIZE;
-        let lookup = vec![0; lookup_length];
-        lookup.write(output, ())?;
-        let mut lookup = Cursor::new(lookup);
-
-        for (index, path) in self.paths.iter().enumerate() {
-            let index = (index as u32) + 1;
-            let offset = output.len() as u64;
-            path.write(output, ctx)?;
-
-            // unwrap: infaillible
-            lookup.write(&index.to_le_bytes()).unwrap();
-            lookup.write(&offset.to_le_bytes()).unwrap();
-        }
-
-        let mut lookup: BitVec<Msb0, u8> = BitVec::try_from_vec(lookup.into_inner()).unwrap();
-        output[lookup_offset..(lookup_offset + lookup_length * 8)].swap_with_bitslice(&mut lookup);
-        Ok(())
+        write_lookup(&self.paths, output, ctx)
     }
 }
 
@@ -168,13 +176,24 @@ struct Attributes {
     mode: u16,
 }
 
-#[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(endian = "little")]
 struct AttributesEntry {
-    #[deku(update = "self.attrs.len()")]
-    attr_count: u32,
+    #[deku(bytes = 4)]
+    attr_count: usize,
+    #[deku(
+        count = "*attr_count * LOOKUP_SIZE",
+        map = "|_: Vec<u8>| -> Result<(), DekuError> { Ok(()) }"
+    )]
+    _lookup: (), // parsed but discarded (only useful when doing partial parses)
     #[deku(count = "attr_count")]
     attrs: Vec<Attributes>,
+}
+
+impl DekuWrite<Endian> for AttributesEntry {
+    fn write(&self, output: &mut BitVec<Msb0, u8>, ctx: Endian) -> Result<(), DekuError> {
+        write_lookup(&self.attrs, output, ctx)
+    }
 }
 
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite)]
