@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, mem::size_of};
 
 #[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
 #[deku(magic = b"\0T\0M\0v\x01", endian = "little")]
-struct Container {
+pub struct Container {
     mode: Mode,
     #[deku(update = "{ use crate::parsers::INDIC_SIZE; self.index.len() as u64 * INDIC_SIZE }")]
     index_bytes: u64,
@@ -16,6 +16,17 @@ struct Container {
     index: Vec<Indic>,
     #[deku(bytes_read = "entries_bytes", ctx = "index")]
     entries: Entries,
+}
+
+/// Like [`Container`], but only the header.
+///
+/// Used when doing partial decodes.
+#[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
+#[deku(magic = b"\0T\0M\0v\x01", endian = "little")]
+pub struct ContainerHeader {
+    mode: Mode,
+    index_bytes: u64,
+    entries_bytes: u64,
 }
 
 // format notes:
@@ -35,7 +46,7 @@ struct Container {
 // duplicated, or that the files are contained in a nested tomo container (or more, with catting).
 // - typical tomo metadata read sequence:
 //   1. match magic, read header for mode and lengths
-//   2. go read the index, + 7 bytes if possible
+//   2. start reading the index
 //   3. find the Paths (0xF0) and if present the Checksums (0xF1) and Signatures (0xF2) indics
 //   4. decompress/decode these entries
 //   5. parse the paths data entry
@@ -58,7 +69,7 @@ struct Container {
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(type = "u8", ctx = "_: Endian")]
 #[repr(u8)]
-enum Mode {
+pub enum Mode {
     #[deku(id = "0x01")]
     Stacked = 1,
 }
@@ -71,7 +82,7 @@ impl Default for Mode {
 
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(type = "u8", ctx = "_: Endian")]
-enum IndicKind {
+pub enum IndicKind {
     #[deku(id = "0x01")]
     File,
     #[deku(id = "0x02")]
@@ -90,7 +101,7 @@ enum IndicKind {
 
 #[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(type = "u8", ctx = "_: Endian")]
-enum PathSeg {
+pub enum PathSeg {
     #[deku(id = "0x01")]
     Segment(#[deku(until = "|v| *v == 0")] Vec<u8>),
 
@@ -100,24 +111,21 @@ enum PathSeg {
 
 #[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(ctx = "endian: Endian")]
-struct Path {
+pub struct Path {
     #[deku(update = "self.segments.len()")]
     segcount: u32,
     #[deku(count = "segcount", ctx = "endian")]
     segments: Vec<PathSeg>,
 }
 
-// todo for paths and attrs entries: add a lookup table/tree for the offset of the paths/attrs in
-// the entry given an path's index, so the entry can be partially decoded instead of loading it all
-// in memory at once or parsing N - 1 paths to find the Nth path.
-
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(ctx = "_: Endian")]
-struct Lookup {
+pub struct Lookup {
     index: u32,
     offset: u64,
 }
 const LOOKUP_SIZE: usize = size_of::<u32>() + size_of::<u64>();
+static_assertions::const_assert_eq!(LOOKUP_SIZE, 12);
 
 fn write_lookup<T: DekuWrite<Endian>>(
     list: &Vec<T>,
@@ -152,7 +160,7 @@ fn write_lookup<T: DekuWrite<Endian>>(
 
 #[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(endian = "little")]
-struct PathsEntry {
+pub struct PathsEntry {
     #[deku(bytes = 4)]
     path_count: usize,
     #[deku(
@@ -172,13 +180,13 @@ impl DekuWrite<Endian> for PathsEntry {
 
 #[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(ctx = "_: Endian")]
-struct Attributes {
+pub struct Attributes {
     mode: u16,
 }
 
 #[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(endian = "little")]
-struct AttributesEntry {
+pub struct AttributesEntry {
     #[deku(bytes = 4)]
     attr_count: usize,
     #[deku(
@@ -198,7 +206,7 @@ impl DekuWrite<Endian> for AttributesEntry {
 
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite)]
 #[deku(ctx = "endian: Endian")]
-struct Indic {
+pub struct Indic {
     #[deku(ctx = "endian")]
     kind: IndicKind,
     #[deku(bytes = 3)]
@@ -221,7 +229,7 @@ static_assertions::const_assert_eq!(INDIC_SIZE, 24);
 
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(type = "u8", ctx = "_: Endian")]
-enum Encoding {
+pub enum Encoding {
     #[deku(id = "0x00")]
     Raw,
     #[deku(id = "0x01")]
@@ -241,21 +249,21 @@ impl Default for Encoding {
 
 #[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(endian = "little")]
-struct ZstdParams {
+pub struct ZstdParams {
     /// Index of the indic that points to the zstd dictionary data file
     dictionary: u64,
 }
 
 #[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(type = "u8", endian = "little")]
-enum CustomParams {
+pub enum CustomParams {
     #[deku(id = "0x01")]
     Program(#[deku(until = "|v: &u8| *v == 0")] Vec<u8>),
 }
 
 #[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
 #[deku(endian = "little")]
-struct EntryHeader {
+pub struct EntryHeader {
     #[deku(bits = 1)]
     has_params: u8,
     #[deku(bits = 1)]
@@ -270,7 +278,7 @@ struct EntryHeader {
 }
 
 #[derive(Clone, Debug)]
-struct Entry {
+pub struct Entry {
     indic: Indic,
     header: EntryHeader,
     data: Vec<u8>,
@@ -285,7 +293,7 @@ impl<T: Copy> DekuWrite<T> for Entry {
 }
 
 #[derive(Clone, Debug, Default)]
-struct Entries {
+pub struct Entries {
     entries: Vec<Entry>,
     offsets: BTreeMap<u64, usize>,
 }
@@ -382,8 +390,23 @@ mod tests {
         let ((rest, _), value) = Container::from_bytes((&data, 0)).unwrap();
         assert_eq!(rest.len(), 0);
         assert_eq!(value.mode, Mode::Stacked);
-        assert_eq!(value.entries.len(), 0);
         assert_eq!(value.index.len(), 0);
+        assert_eq!(value.entries.len(), 0);
+    }
+
+    #[test]
+    fn empty_partial() {
+        let mut data = Vec::new();
+        data.extend(&MAGIC);
+        data.extend(vec![Mode::Stacked as u8]);
+        data.extend(&0_u64.to_le_bytes());
+        data.extend(&0_u64.to_le_bytes());
+
+        let ((rest, _), value) = ContainerHeader::from_bytes((&data, 0)).unwrap();
+        assert_eq!(rest.len(), 0);
+        assert_eq!(value.mode, Mode::Stacked);
+        assert_eq!(value.entries_bytes, 0);
+        assert_eq!(value.index_bytes, 0);
     }
 
     #[test]
@@ -521,24 +544,39 @@ mod tests {
         assert_eq!(value.entries.len(), 3);
         assert_eq!(value.index.len(), 3);
 
-        let paths_indic = value.index.iter().find(|indic| indic.kind == IndicKind::Paths).unwrap();
+        let paths_indic = value
+            .index
+            .iter()
+            .find(|indic| indic.kind == IndicKind::Paths)
+            .unwrap();
         let paths_entry = value.entries.from_offset(paths_indic.offset).unwrap();
         assert_eq!(paths_entry.header.encoding, Encoding::Raw);
         let ((rest, _), pathsv) = PathsEntry::from_bytes((&paths_entry.data, 0)).unwrap();
         assert_eq!(rest.len(), 0, "remaining data on paths entry");
-        assert_eq!(pathsv.paths, vec![Path {
-            segcount: 1,
-            segments: vec![PathSeg::Segment(b"hello\0".to_vec())],
-        }]);
+        assert_eq!(
+            pathsv.paths,
+            vec![Path {
+                segcount: 1,
+                segments: vec![PathSeg::Segment(b"hello\0".to_vec())],
+            }]
+        );
 
-        let attrs_indic = value.index.iter().find(|indic| indic.kind == IndicKind::Attributes).unwrap();
+        let attrs_indic = value
+            .index
+            .iter()
+            .find(|indic| indic.kind == IndicKind::Attributes)
+            .unwrap();
         let attrs_entry = value.entries.from_offset(attrs_indic.offset).unwrap();
         assert_eq!(attrs_entry.header.encoding, Encoding::Raw);
         let ((rest, _), attrsv) = AttributesEntry::from_bytes((&attrs_entry.data, 0)).unwrap();
         assert_eq!(rest.len(), 0, "remaining data on attrs entry");
         assert_eq!(attrsv.attrs, vec![Attributes { mode: 0o644 }]);
 
-        let file_indic = value.index.iter().find(|indic| indic.kind == IndicKind::File).unwrap();
+        let file_indic = value
+            .index
+            .iter()
+            .find(|indic| indic.kind == IndicKind::File)
+            .unwrap();
         let file_entry = value.entries.from_offset(file_indic.offset).unwrap();
         assert_eq!(file_entry.header.encoding, Encoding::Raw);
         assert_eq!(file_entry.data, b"Hello world!".to_vec());
