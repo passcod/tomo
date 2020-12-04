@@ -4,6 +4,8 @@ use deku::{
 };
 use std::{collections::BTreeMap, mem::size_of};
 
+/// Full container. Only used for tests.
+#[cfg(test)]
 #[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
 #[deku(magic = b"\0T\0M\0v\x01", endian = "little")]
 pub struct Container {
@@ -18,9 +20,8 @@ pub struct Container {
     entries: Entries,
 }
 
-/// Like [`Container`], but only the header.
-///
-/// Used when doing partial decodes.
+pub const MAGIC: [u8; 7] = *b"\0T\0M\0v\x01";
+
 #[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
 #[deku(magic = b"\0T\0M\0v\x01", endian = "little")]
 pub struct ContainerHeader {
@@ -28,6 +29,10 @@ pub struct ContainerHeader {
     index_bytes: u64,
     entries_bytes: u64,
 }
+
+pub const CONTAINER_HEADER_SIZE: usize =
+    MAGIC.len() + size_of::<Mode>() + size_of::<u64>() + size_of::<u64>();
+static_assertions::const_assert_eq!(CONTAINER_HEADER_SIZE, 24);
 
 // format notes:
 //
@@ -124,7 +129,7 @@ pub struct Lookup {
     index: u32,
     offset: u64,
 }
-const LOOKUP_SIZE: usize = size_of::<u32>() + size_of::<u64>();
+pub const LOOKUP_SIZE: usize = size_of::<u32>() + size_of::<u64>();
 static_assertions::const_assert_eq!(LOOKUP_SIZE, 12);
 
 fn write_lookup<T: DekuWrite<Endian>>(
@@ -219,7 +224,7 @@ pub struct Indic {
 }
 
 // its packed size, NOT its layout size
-const INDIC_SIZE: u64 = (size_of::<IndicKind>() +
+pub const INDIC_SIZE: u64 = (size_of::<IndicKind>() +
     3 + // "u24"
     3 + // "u24"
     size_of::<u8>() +
@@ -371,13 +376,11 @@ impl<T: Copy> DekuWrite<T> for Entries {
 mod tests {
     use super::*;
 
-    const MAGIC: [u8; 7] = *b"\0T\0M\0v\x01";
-
     #[test]
     fn empty() {
         let mut data = Vec::new();
         data.extend(&MAGIC);
-        data.extend(vec![Mode::Stacked as u8]);
+        data.push(Mode::Stacked as u8);
         data.extend(&0_u64.to_le_bytes());
         data.extend(&0_u64.to_le_bytes());
         dbg!(&data);
@@ -398,7 +401,7 @@ mod tests {
     fn empty_partial() {
         let mut data = Vec::new();
         data.extend(&MAGIC);
-        data.extend(vec![Mode::Stacked as u8]);
+        data.push(Mode::Stacked as u8);
         data.extend(&0_u64.to_le_bytes());
         data.extend(&0_u64.to_le_bytes());
 
@@ -413,7 +416,7 @@ mod tests {
     fn catted() {
         let mut data = Vec::new();
         data.extend(&MAGIC);
-        data.extend(vec![Mode::Stacked as u8]);
+        data.push(Mode::Stacked as u8);
         data.extend(&0_u64.to_le_bytes());
         data.extend(&0_u64.to_le_bytes());
         let datalen = data.len();
@@ -437,7 +440,7 @@ mod tests {
     fn single_file_raw_lowlevel() {
         let mut ctnr = Vec::new();
         ctnr.extend(&MAGIC);
-        ctnr.extend(vec![Mode::Stacked as u8]);
+        ctnr.push(Mode::Stacked as u8);
 
         let pathsoffset = 0;
         let pathsdata = {
