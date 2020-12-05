@@ -1,3 +1,4 @@
+use eyre::Result;
 use futures::io::Cursor;
 use tomo::parsers;
 use tomo::prelude::*;
@@ -12,7 +13,7 @@ fn empty() -> Vec<u8> {
 }
 
 #[async_std::test]
-async fn only_one() -> Result<(), TomoError> {
+async fn only_one() -> Result<()> {
     let mut reader = Cursor::new(empty());
     let mut tomo = Tomo::default();
     let ss = tomo.load(Seekable::new(&mut reader)).await?;
@@ -22,7 +23,7 @@ async fn only_one() -> Result<(), TomoError> {
 }
 
 #[async_std::test]
-async fn one_then_another() -> Result<(), TomoError> {
+async fn one_then_another() -> Result<()> {
     let mut double = empty();
     double.extend(empty());
     let mut reader = Cursor::new(double);
@@ -38,7 +39,7 @@ async fn one_then_another() -> Result<(), TomoError> {
 }
 
 #[async_std::test]
-async fn two_at_once() -> Result<(), TomoError> {
+async fn two_at_once() -> Result<()> {
     let mut double = empty();
     double.extend(empty());
     let mut reader = Cursor::new(double);
