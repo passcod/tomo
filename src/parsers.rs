@@ -25,9 +25,9 @@ pub const MAGIC: [u8; 7] = *b"\0T\0M\0v\x01";
 #[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
 #[deku(magic = b"\0T\0M\0v\x01", endian = "little")]
 pub struct ContainerHeader {
-    mode: Mode,
-    index_bytes: u64,
-    entries_bytes: u64,
+    pub mode: Mode,
+    pub index_bytes: u64,
+    pub entries_bytes: u64,
 }
 
 pub const CONTAINER_HEADER_SIZE: usize =

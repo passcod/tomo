@@ -1,8 +1,8 @@
 use deku::DekuContainerRead;
-use futures::{AsyncRead, AsyncReadExt, AsyncSeek};
+use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use parsers::ContainerHeader;
 use seekable::{Seekable, SeekableSource};
-use std::fmt;
+use std::{fmt, io::SeekFrom};
 use thiserror::Error;
 
 pub mod parsers;
@@ -18,9 +18,9 @@ pub struct Tomo<'s> {
     sources: Vec<SourceState<'s>>,
 }
 
-struct SourceState<'s> {
+pub struct SourceState<'s> {
     source: Box<dyn SeekableSource + 's>,
-    offset: usize,
+    offset: u64,
     headers: Vec<ContainerHeader>,
 }
 
@@ -44,13 +44,14 @@ impl<'s> Tomo<'s> {
     /// The source will be parsed as far as it can, and any container headers found added to the
     /// state. This may pause indefinitely if the source is waiting for more data and none is
     /// forthcoming (e.g. a stalled network fetch). It's therefore recommended to preprocess a
-    /// source that may have that behaviour with e.g. a timeout.
+    /// source that may have that behaviour with e.g. a timeout, or to use [`Tomo::load_one`] to
+    /// stop at the first container.
     ///
     /// Tomo keeps track of the offset it seeks and reads at internally, and only does relative
     /// seeks, so the source can be already seeked to a position and it will never look back before
     /// that. This is useful when concatenating Tomo archives to other file types. However, Tomo
     /// expects the source to contain containers: it will not attempt to discover them by reading
-    /// the source until it finds a Tomo magic, and it stop with a [`TomoError::NotAContainer`]
+    /// the source until it finds a Tomo magic, and will stop with a [`TomoError::NotAContainer`]
     /// error if/when it finds non-tomo data.
     ///
     /// The byte source needs to be wrapped in a [`Seekable`]:
@@ -72,20 +73,42 @@ impl<'s> Tomo<'s> {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn load<T: AsyncRead + AsyncSeek + Unpin>(
-        &mut self,
+    ///
+    /// Returns a shared borrow to the source state created for this source, which can be used to
+    /// prompt the state to load or extract data from this particular source.
+    pub async fn load<'slf, T: AsyncRead + AsyncSeek + Unpin>(
+        &'slf mut self,
+        source: Seekable<'s, T>,
+    ) -> Result<&'slf SourceState<'s>, TomoError> {
+        // todo: parse more
+        self.load_one(source).await
+    }
+
+    /// Load one container from a byte source.
+    ///
+    /// Same as [`Tomo::load`], but stops after a reading a single container. Seeks the source to
+    /// the end of the container, but does not parse more than the header upfront.
+    ///
+    /// Returns a shared borrow to the source state created for this source, which can be used to
+    /// prompt the state to load another container or extract data from this particular source.
+    pub async fn load_one<'slf, T: AsyncRead + AsyncSeek + Unpin>(
+        &'slf mut self,
         mut source: Seekable<'s, T>,
-    ) -> Result<(), TomoError> {
+    ) -> Result<&'slf SourceState<'s>, TomoError> {
         let mut buf = vec![0_u8; parsers::CONTAINER_HEADER_SIZE];
-        let offset = source.read(&mut buf).await?;
+        let mut offset = source.read(&mut buf).await? as u64;
         let mut headers = Vec::new();
 
         let ((rest, _), header) = ContainerHeader::from_bytes((&buf, 0))?;
-        headers.push(header);
 
+        let end = header.index_bytes + header.entries_bytes;
+        offset += end as u64;
+        source.seek(SeekFrom::Current(end as i64)).await?;
+
+        headers.push(header);
         let source = Box::new(source);
         self.sources.push(SourceState { source, offset, headers });
-        Ok(())
+        Ok(&self.sources[self.sources.len() - 1])
     }
 }
 

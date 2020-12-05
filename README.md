@@ -9,10 +9,9 @@ caution._
 Tomo has some interesting properties:
 
  - It's always possible to `cat` two archives together to add one to the other.
- - While streaming isn't a goal of Tomo, packing and unpacking should be both
-   doable with limited memory (i.e. smaller than the contents) and parallelised
-   as much as possible.
- - Yes, even with compression.
+ - It's always possible to read or write a single file or subset of files efficiently.
+ - It's always possible to read and write archives that are larger than memory.
+ - It's always possible to parallelise reading and writing archives.
 
 And some interesting features:
 
@@ -35,6 +34,12 @@ And some interesting features:
    other strategies.
  - Paths are stored in a platform-independent format, with components split up,
    such that windows and unix paths syntax differences (mostly) don't matter.
+ - Packing and unpacking are both done by reading the minimum required into
+   memory, and reading from or writing to disk (or whatever byte source) as
+   needed when needed, so memory requirements are kept low.
+ - Both packing and unpacking are highly async processes, and can be
+   parallelised as much as possible (but do not _require_ parallelism).
+ - Yes, even with compression.
 
 Tomo is designed:
 
@@ -44,7 +49,7 @@ Tomo is designed:
  - To support being mounted as a read/write virtual filesystem.
  - To make use of multi-core and high-parallelism CPUs and I/O (SSDs).
 
-Some limitations (so far):
+Some "limitations" (so far):
 
  - Container size is limited to 18 exabytes
  - Each container is limited to 16 million files
