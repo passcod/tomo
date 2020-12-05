@@ -2,7 +2,7 @@ use deku::{
     ctx::{Endian, Limit},
     prelude::*,
 };
-use std::{collections::BTreeMap, mem::size_of};
+use std::{collections::HashMap, mem::size_of};
 
 /// Full container. Only used for tests.
 #[cfg(test)]
@@ -300,7 +300,7 @@ impl<T: Copy> DekuWrite<T> for Entry {
 #[derive(Clone, Debug, Default)]
 pub struct Entries {
     entries: Vec<Entry>,
-    offsets: BTreeMap<u64, usize>,
+    offsets: HashMap<u64, usize>,
 }
 
 impl Entries {
@@ -325,7 +325,7 @@ impl DekuRead<(Limit<u8, for<'r> fn(&'r u8) -> bool>, (Endian, &Vec<Indic>))> fo
         };
 
         let mut entries = Vec::with_capacity(index.len());
-        let mut offsets = BTreeMap::new();
+        let mut offsets = HashMap::new();
 
         // todo: record visited ranges and warn if there's extra
 
