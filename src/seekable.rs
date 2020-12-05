@@ -5,7 +5,7 @@ use futures::{
 };
 use std::pin::Pin;
 
-pub trait SeekableSource: AsyncRead + AsyncSeek {}
+pub trait SeekableSource: AsyncRead + AsyncSeek + Unpin {}
 
 pub struct Seekable<'t, T: AsyncRead + AsyncSeek + Unpin> {
     pub source: &'t mut T,

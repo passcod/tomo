@@ -1,6 +1,6 @@
 use deku::DekuContainerRead;
 use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
-use parsers::ContainerHeader;
+use parsers::{ContainerHeader, CONTAINER_HEADER_SIZE};
 use seekable::{Seekable, SeekableSource};
 use std::{fmt, io::SeekFrom};
 use thiserror::Error;
@@ -10,8 +10,10 @@ pub mod seekable;
 
 pub mod prelude {
     pub use crate::seekable::{Seekable, SeekableSource};
-    pub use crate::{Tomo, TomoError};
+    pub use crate::{SourceStatus, Tomo, TomoError};
 }
+
+// FIXME: all the `as` conversions really need to be ::from and ::try_from
 
 #[derive(Debug, Default)]
 pub struct Tomo<'s> {
@@ -21,7 +23,7 @@ pub struct Tomo<'s> {
 pub struct SourceState<'s> {
     source: Box<dyn SeekableSource + 's>,
     offset: u64,
-    headers: Vec<ContainerHeader>,
+    headers: Vec<(u64, ContainerHeader)>,
 }
 
 impl fmt::Debug for SourceState<'_> {
@@ -31,6 +33,73 @@ impl fmt::Debug for SourceState<'_> {
             .field("offset", &self.offset)
             .field("headers", &self.headers)
             .finish()
+    }
+}
+
+impl<'s> SourceState<'s> {
+    fn new(source: Box<dyn SeekableSource + 's>) -> Self {
+        SourceState {
+            source,
+            offset: 0,
+            headers: Vec::new(),
+        }
+    }
+
+    /// The amount of loaded containers for this source.
+    pub fn len(&self) -> usize {
+        self.headers.len()
+    }
+
+    /// Load the next container from this source.
+    ///
+    /// Seeks to the end of the last known container on the source (or nowhere if none have been
+    /// loaded yet), then attempts to load a container. If it finds one, it will also probe the
+    /// source and return a [`SourceState`] describing whether the source is at its end, or whether
+    /// there's more data to go.
+    pub async fn load_next_container(&mut self) -> Result<SourceStatus, TomoError> {
+        let current_end = self
+            .headers
+            .last()
+            .map(|(start, header)| {
+                start + (CONTAINER_HEADER_SIZE as u64) + header.index_bytes + header.entries_bytes
+            })
+            .unwrap_or(0);
+
+        self.source
+            .seek(SeekFrom::Current((current_end - self.offset) as i64))
+            .await?;
+
+        let mut buf = vec![0_u8; CONTAINER_HEADER_SIZE];
+        self.offset += self.source.read(&mut buf).await? as u64;
+
+        let (_, header) = ContainerHeader::from_bytes((&buf, 0))?;
+        let end = header.index_bytes + header.entries_bytes;
+        self.headers.push((current_end, header));
+        self.offset += end as u64;
+        self.source.seek(SeekFrom::Current(end as i64)).await?;
+
+        // As per AsyncSeek documentation:
+        //
+        //    “A seek beyond the end of a stream is allowed,
+        //     but behavior is defined by the implementation.”
+        //
+        // This is annoying, because it might be that some sources return some kind of io::Error,
+        // or return garbage data or even unitialised data (ugh!), but we'll hope that everything
+        // is well-behaved and obeys what we test for below:
+        //
+        // That if the source is at EOF, attempting a read will return immediately, telling us it's
+        // read nothing (read().await? == 0), and otherwise we can safely assume there's more data.
+        //
+        // If we cannot detect EOF, I'm not sure what to do >:(
+        let mut past_the_end = vec![0_u8];
+        let presumably_not = self.source.read(&mut past_the_end).await? as i64;
+        self.source.seek(SeekFrom::Current(-presumably_not)).await?;
+
+        Ok(if presumably_not == 0 {
+            SourceStatus::EndOfSource
+        } else {
+            SourceStatus::MoreToGo
+        })
     }
 }
 
@@ -80,8 +149,9 @@ impl<'s> Tomo<'s> {
         &'slf mut self,
         source: Seekable<'s, T>,
     ) -> Result<&'slf SourceState<'s>, TomoError> {
-        // todo: parse more
-        self.load_one(source).await
+        let ss = self.add_source(source);
+        while ss.load_next_container().await? == SourceStatus::MoreToGo {}
+        Ok(ss)
     }
 
     /// Load one container from a byte source.
@@ -90,25 +160,25 @@ impl<'s> Tomo<'s> {
     /// the end of the container, but does not parse more than the header upfront.
     ///
     /// Returns a shared borrow to the source state created for this source, which can be used to
-    /// prompt the state to load another container or extract data from this particular source.
+    /// prompt the state to load another container or extract data from this particular source, and
+    /// the [`SourceStatus`] after the first read.
     pub async fn load_one<'slf, T: AsyncRead + AsyncSeek + Unpin>(
         &'slf mut self,
-        mut source: Seekable<'s, T>,
-    ) -> Result<&'slf SourceState<'s>, TomoError> {
-        let mut buf = vec![0_u8; parsers::CONTAINER_HEADER_SIZE];
-        let mut offset = source.read(&mut buf).await? as u64;
-        let mut headers = Vec::new();
+        source: Seekable<'s, T>,
+    ) -> Result<(&'slf mut SourceState<'s>, SourceStatus), TomoError> {
+        let ss = self.add_source(source);
+        let st = ss.load_next_container().await?;
+        Ok((ss, st))
+    }
 
-        let ((rest, _), header) = ContainerHeader::from_bytes((&buf, 0))?;
-
-        let end = header.index_bytes + header.entries_bytes;
-        offset += end as u64;
-        source.seek(SeekFrom::Current(end as i64)).await?;
-
-        headers.push(header);
-        let source = Box::new(source);
-        self.sources.push(SourceState { source, offset, headers });
-        Ok(&self.sources[self.sources.len() - 1])
+    fn add_source<'slf, T: AsyncRead + AsyncSeek + Unpin>(
+        &'slf mut self,
+        source: Seekable<'s, T>,
+    ) -> &'slf mut SourceState<'s> {
+        let ss = SourceState::new(Box::new(source));
+        let pos = self.sources.len();
+        self.sources.push(ss);
+        &mut self.sources[pos]
     }
 }
 
@@ -121,5 +191,11 @@ pub enum TomoError {
     Parse(#[from] deku::error::DekuError),
 
     #[error("found non-tomo data at offset {offset:}")]
-    NotAContainer { offset: usize }
+    NotAContainer { offset: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceStatus {
+    MoreToGo,
+    EndOfSource,
 }
