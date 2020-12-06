@@ -5,12 +5,16 @@ use seekable::{Seekable, SeekableSource};
 use std::{fmt, io::SeekFrom};
 use thiserror::Error;
 
+pub use stream::PathsStream;
+
 pub mod parsers;
 pub mod seekable;
+mod stream;
 
 pub mod prelude {
 	pub use crate::seekable::{Seekable, SeekableSource};
 	pub use crate::{SourceStatus, Tomo, TomoError};
+	pub use futures::stream::StreamExt as _;
 }
 
 // FIXME: all the `as` conversions really need to be ::from and ::try_from
@@ -48,6 +52,22 @@ impl<'s> SourceState<'s> {
 	/// The amount of loaded containers for this source.
 	pub fn len(&self) -> usize {
 		self.headers.len()
+	}
+
+	pub(crate) async fn seek_to(&mut self, target: u64) -> Result<(), TomoError> {
+		if target > self.offset {
+			let diff = (target - self.offset) as i64;
+			self.source.seek(SeekFrom::Current(diff)).await?;
+			self.offset = target;
+			Ok(())
+		} else if target < self.offset {
+			let diff = (self.offset - target) as i64;
+			self.source.seek(SeekFrom::Current(-diff)).await?;
+			self.offset = target;
+			Ok(())
+		} else {
+			Ok(()) // target == self.offset
+		}
 	}
 
 	/// Load the next container from this source.
@@ -101,6 +121,18 @@ impl<'s> SourceState<'s> {
 			SourceStatus::MoreToGo
 		})
 	}
+
+	pub(crate) fn index<'src: 's>(&'src mut self, container: usize) -> Option<stream::IndexStream<'src>> {
+		if container >= self.headers.len() {
+			None
+		} else {
+			Some(stream::IndexStream::new(self, container))
+		}
+	}
+
+	// pub(crate) fn entries(&self, container: usize) -> stream::EntriesStream<'_> {
+	// 	stream::EntriesStream::new(self, container)
+	// }
 }
 
 impl<'s> Tomo<'s> {
@@ -169,6 +201,15 @@ impl<'s> Tomo<'s> {
 		let ss = self.add_source(source);
 		let st = ss.load_next_container().await?;
 		Ok((ss, st))
+	}
+
+	/// The amount of loaded containers.
+	pub fn len(&self) -> usize {
+		self.sources.iter().map(|source| source.len()).sum()
+	}
+
+	pub fn paths<'tomo>(&'tomo mut self) -> PathsStream<'tomo, 's> {
+		PathsStream::new(self)
 	}
 
 	fn add_source<'slf, T: AsyncRead + AsyncSeek + Unpin>(

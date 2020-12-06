@@ -1,24 +1,7 @@
-use deku::{
-	ctx::{Endian, Limit},
-	prelude::*,
-};
-use std::{collections::HashMap, mem::size_of};
+use deku::{ctx::Endian, prelude::*};
+use std::mem::size_of;
 
-/// Full container. Only used for tests.
-#[cfg(test)]
-#[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
-#[deku(magic = b"\0T\0M\0v\x01", endian = "little")]
-pub struct Container {
-	mode: Mode,
-	#[deku(update = "{ use crate::parsers::INDIC_SIZE; self.index.len() as u64 * INDIC_SIZE }")]
-	index_bytes: u64,
-	#[deku(update = "self.entries.len()")]
-	entries_bytes: u64,
-	#[deku(count = "index_bytes / INDIC_SIZE")]
-	index: Vec<Indic>,
-	#[deku(bytes_read = "entries_bytes", ctx = "index")]
-	entries: Entries,
-}
+// *_SIZE constants measure the packed (deku) size, not the layout in memory (rust) size.
 
 pub const MAGIC: [u8; 7] = *b"\0T\0M\0v\x01";
 
@@ -210,20 +193,18 @@ impl DekuWrite<Endian> for AttributesEntry {
 }
 
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite)]
-#[deku(ctx = "endian: Endian")]
+#[deku(endian = "little")]
 pub struct Indic {
-	#[deku(ctx = "endian")]
-	kind: IndicKind,
+	pub kind: IndicKind,
 	#[deku(bytes = 3)]
-	path: u32,
+	pub path: u32,
 	#[deku(bytes = 3)]
-	attrs: u32,
+	pub attrs: u32,
 	_reserved: u8,
-	offset: u64,
-	length: u64,
+	pub offset: u64,
+	pub length: u64,
 }
 
-// its packed size, NOT its layout size
 pub const INDIC_SIZE: u64 = (size_of::<IndicKind>() +
     3 + // "u24"
     3 + // "u24"
@@ -282,99 +263,141 @@ pub struct EntryHeader {
 	params: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
-pub struct Entry {
-	indic: Indic,
-	header: EntryHeader,
-	data: Vec<u8>,
-}
-
-impl<T: Copy> DekuWrite<T> for Entry {
-	fn write(&self, output: &mut BitVec<Msb0, u8>, _: T) -> Result<(), DekuError> {
-		self.header.write(output, ())?;
-		self.data.write(output, ())?;
-		Ok(())
-	}
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Entries {
-	entries: Vec<Entry>,
-	offsets: HashMap<u64, usize>,
-}
-
-impl Entries {
-	pub fn len(&self) -> usize {
-		self.entries.len()
-	}
-
-	pub fn from_offset(&self, offset: u64) -> Option<&Entry> {
-		let index = *self.offsets.get(&offset)?;
-		self.entries.get(index)
-	}
-}
-
-impl DekuRead<(Limit<u8, for<'r> fn(&'r u8) -> bool>, (Endian, &Vec<Indic>))> for Entries {
-	fn read<'bs>(
-		input: &'bs BitSlice<Msb0, u8>,
-		ctx: (Limit<u8, for<'r> fn(&'r u8) -> bool>, (Endian, &Vec<Indic>)),
-	) -> Result<(&'bs BitSlice<Msb0, u8>, Self), DekuError> {
-		let (bits, index) = match ctx {
-			(Limit::Bits(bits), (_, index)) => (*bits, index),
-			_ => unreachable!("Entries should be read with bytes_read"),
-		};
-
-		let mut entries = Vec::with_capacity(index.len());
-		let mut offsets = HashMap::new();
-
-		// todo: record visited ranges and warn if there's extra
-
-		for indic in index {
-			let start = (indic.offset * 8) as usize;
-			let length = (indic.length * 8) as usize;
-			let end = start + length;
-
-			let entry = &input[start..end];
-			assert_eq!(entry.len(), length, "entry length remaining vs calculated");
-			let (post_header, header) = EntryHeader::read(entry, ())?;
-			let header_length = length - post_header.len();
-			let data_length = length - header_length;
-			let data_bits = &entry[header_length..];
-			assert_eq!(
-				data_bits.len(),
-				data_length,
-				"entry data length remaining vs calculated"
-			);
-
-			let (rest, data) = Vec::read(data_bits, ((data_length / 8).into(), ()))?;
-			assert_eq!(rest.len(), 0, "remaining data after vec read");
-
-			let ex = entries.len();
-			entries.push(Entry {
-				indic: *indic,
-				header,
-				data,
-			});
-			offsets.insert(indic.offset, ex);
-		}
-
-		Ok((&input[bits..], Self { entries, offsets }))
-	}
-}
-
-impl<T: Copy> DekuWrite<T> for Entries {
-	fn write(&self, output: &mut BitVec<Msb0, u8>, _: T) -> Result<(), DekuError> {
-		for entry in &self.entries {
-			entry.write(output, ())?;
-		}
-
-		Ok(())
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use deku::ctx::{Endian, Limit};
+	use std::collections::HashMap;
+
+	// below structures emulate reading/writing via deku for testing the parsers
+	// but actual tomo code is all about reading only what needs to be, not all.
+	#[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
+	#[deku(magic = b"\0T\0M\0v\x01", endian = "little")]
+	pub struct TestContainer {
+		mode: Mode,
+		#[deku(
+			update = "{ use crate::parsers::INDIC_SIZE; self.index.len() as u64 * INDIC_SIZE }"
+		)]
+		index_bytes: u64,
+		#[deku(update = "self.entries.len()")]
+		entries_bytes: u64,
+		#[deku(count = "index_bytes / INDIC_SIZE")]
+		index: Vec<TestIndic>,
+		#[deku(bytes_read = "entries_bytes", ctx = "index")]
+		entries: TestEntries,
+	}
+
+	#[derive(Clone, Copy, Debug, DekuRead, DekuWrite)]
+	#[deku(ctx = "endian: Endian")]
+	pub struct TestIndic {
+		#[deku(ctx = "endian")]
+		kind: IndicKind,
+		#[deku(bytes = 3)]
+		path: u32,
+		#[deku(bytes = 3)]
+		attrs: u32,
+		_reserved: u8,
+		offset: u64,
+		length: u64,
+	}
+
+	#[derive(Clone, Debug)]
+	pub struct TestEntry {
+		indic: TestIndic,
+		header: EntryHeader,
+		data: Vec<u8>,
+	}
+
+	impl<T: Copy> DekuWrite<T> for TestEntry {
+		fn write(&self, output: &mut BitVec<Msb0, u8>, _: T) -> Result<(), DekuError> {
+			self.header.write(output, ())?;
+			self.data.write(output, ())?;
+			Ok(())
+		}
+	}
+
+	#[derive(Clone, Debug, Default)]
+	pub struct TestEntries {
+		entries: Vec<TestEntry>,
+		offsets: HashMap<u64, usize>,
+	}
+
+	impl TestEntries {
+		pub fn len(&self) -> usize {
+			self.entries.len()
+		}
+
+		pub fn from_offset(&self, offset: u64) -> Option<&TestEntry> {
+			let index = *self.offsets.get(&offset)?;
+			self.entries.get(index)
+		}
+	}
+
+	impl
+		DekuRead<(
+			Limit<u8, for<'r> fn(&'r u8) -> bool>,
+			(Endian, &Vec<TestIndic>),
+		)> for TestEntries
+	{
+		fn read<'bs>(
+			input: &'bs BitSlice<Msb0, u8>,
+			ctx: (
+				Limit<u8, for<'r> fn(&'r u8) -> bool>,
+				(Endian, &Vec<TestIndic>),
+			),
+		) -> Result<(&'bs BitSlice<Msb0, u8>, Self), DekuError> {
+			let (bits, index) = match ctx {
+				(Limit::Bits(bits), (_, index)) => (*bits, index),
+				_ => unreachable!("Entries should be read with bytes_read"),
+			};
+
+			let mut entries = Vec::with_capacity(index.len());
+			let mut offsets = HashMap::new();
+
+			// todo: record visited ranges and warn if there's extra
+
+			for indic in index {
+				let start = (indic.offset * 8) as usize;
+				let length = (indic.length * 8) as usize;
+				let end = start + length;
+
+				let entry = &input[start..end];
+				assert_eq!(entry.len(), length, "entry length remaining vs calculated");
+				let (post_header, header) = EntryHeader::read(entry, ())?;
+				let header_length = length - post_header.len();
+				let data_length = length - header_length;
+				let data_bits = &entry[header_length..];
+				assert_eq!(
+					data_bits.len(),
+					data_length,
+					"entry data length remaining vs calculated"
+				);
+
+				let (rest, data) = Vec::read(data_bits, ((data_length / 8).into(), ()))?;
+				assert_eq!(rest.len(), 0, "remaining data after vec read");
+
+				let ex = entries.len();
+				entries.push(TestEntry {
+					indic: *indic,
+					header,
+					data,
+				});
+				offsets.insert(indic.offset, ex);
+			}
+
+			Ok((&input[bits..], Self { entries, offsets }))
+		}
+	}
+
+	impl<T: Copy> DekuWrite<T> for TestEntries {
+		fn write(&self, output: &mut BitVec<Msb0, u8>, _: T) -> Result<(), DekuError> {
+			for entry in &self.entries {
+				entry.write(output, ())?;
+			}
+
+			Ok(())
+		}
+	}
 
 	#[test]
 	fn empty() {
@@ -385,12 +408,12 @@ mod tests {
 		data.extend(&0_u64.to_le_bytes());
 		dbg!(&data);
 
-		let value = Container::default();
+		let value = TestContainer::default();
 		let data_out = value.to_bytes().unwrap();
 		assert_eq!(data_out, data);
 		dbg!(&data_out);
 
-		let ((rest, _), value) = Container::from_bytes((&data, 0)).unwrap();
+		let ((rest, _), value) = TestContainer::from_bytes((&data, 0)).unwrap();
 		assert_eq!(rest.len(), 0);
 		assert_eq!(value.mode, Mode::Stacked);
 		assert_eq!(value.index.len(), 0);
@@ -423,13 +446,13 @@ mod tests {
 		let mut double = data.clone();
 		double.extend(&data);
 
-		let ((rest, _), value) = Container::from_bytes((&double, 0)).unwrap();
+		let ((rest, _), value) = TestContainer::from_bytes((&double, 0)).unwrap();
 		assert_eq!(rest.len(), datalen);
 		assert_eq!(value.mode, Mode::Stacked);
 		assert_eq!(value.entries.len(), 0);
 		assert_eq!(value.index.len(), 0);
 
-		let ((rest2, _), value) = Container::from_bytes((&rest, 0)).unwrap();
+		let ((rest2, _), value) = TestContainer::from_bytes((&rest, 0)).unwrap();
 		assert_eq!(rest2.len(), 0);
 		assert_eq!(value.mode, Mode::Stacked);
 		assert_eq!(value.entries.len(), 0);
@@ -540,7 +563,7 @@ mod tests {
 		ctnr.extend(data);
 		dbg!(&ctnr);
 
-		let ((rest, _), value) = Container::from_bytes((&ctnr, 0)).unwrap();
+		let ((rest, _), value) = TestContainer::from_bytes((&ctnr, 0)).unwrap();
 		dbg!(&value);
 		assert_eq!(rest, &[]);
 		assert_eq!(value.mode, Mode::Stacked);

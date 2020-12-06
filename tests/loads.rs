@@ -17,7 +17,14 @@ async fn only_one() -> Result<()> {
 	let mut reader = Cursor::new(empty());
 	let mut tomo = Tomo::default();
 	let ss = tomo.load(Seekable::new(&mut reader)).await?;
+
 	assert_eq!(ss.len(), 1);
+	if let Some(path) = tomo.paths().next().await {
+		let path = path?;
+		// assert!...
+	} else {
+		assert!(false, "expected a path");
+	}
 
 	Ok(())
 }
