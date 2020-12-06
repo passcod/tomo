@@ -53,6 +53,10 @@ static_assertions::const_assert_eq!(CONTAINER_HEADER_SIZE, 24);
 // - there's a limit of 16 million paths and 16 million attributes per tomo container, but you can
 // exceed that limit in a single file by catting.
 // - zstd dictionary mode is natively supported and the default on cli.
+// - hard limit of one Paths entry and one Attributes entry per container. for robustness sake, if
+// more than one such entry are in a container, only the first one is used.
+// - (todo) a ReversePaths entry type that contains a serialized tree of paths in filesystem layout
+// to indic numbers, to facilitate lookups by path. opt-out.
 
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(type = "u8", ctx = "_: Endian")]
@@ -98,98 +102,34 @@ pub enum PathSeg {
 }
 
 #[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
-#[deku(ctx = "endian: Endian")]
+#[deku(endian = "little")]
 pub struct Path {
 	#[deku(update = "self.segments.len()")]
 	segcount: u32,
-	#[deku(count = "segcount", ctx = "endian")]
+	#[deku(count = "segcount")]
 	segments: Vec<PathSeg>,
-}
-
-#[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
-#[deku(ctx = "_: Endian")]
-pub struct Lookup {
-	index: u32,
-	offset: u64,
-}
-pub const LOOKUP_SIZE: usize = size_of::<u32>() + size_of::<u64>();
-static_assertions::const_assert_eq!(LOOKUP_SIZE, 12);
-
-fn write_lookup<T: DekuWrite<Endian>>(
-	list: &Vec<T>,
-	output: &mut BitVec<Msb0, u8>,
-	ctx: Endian,
-) -> Result<(), DekuError> {
-	use std::io::{Cursor, Write};
-
-	let path_count = list.len();
-	(path_count as u32).write(output, ctx)?;
-
-	let lookup_offset = output.len();
-	let lookup_length = path_count * LOOKUP_SIZE;
-	let lookup = vec![0; lookup_length];
-	lookup.write(output, ())?;
-	let mut lookup = Cursor::new(lookup);
-
-	for (index, item) in list.iter().enumerate() {
-		let index = (index as u32) + 1;
-		let offset = output.len() as u64;
-		item.write(output, ctx)?;
-
-		// unwrap: infaillible
-		lookup.write(&index.to_le_bytes()).unwrap();
-		lookup.write(&offset.to_le_bytes()).unwrap();
-	}
-
-	let mut lookup: BitVec<Msb0, u8> = BitVec::try_from_vec(lookup.into_inner()).unwrap();
-	output[lookup_offset..(lookup_offset + lookup_length * 8)].swap_with_bitslice(&mut lookup);
-	Ok(())
 }
 
 #[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(endian = "little")]
-pub struct PathsEntry {
+pub struct PathsEntryHeader {
 	#[deku(bytes = 4)]
-	path_count: usize,
-	#[deku(
-		count = "*path_count * LOOKUP_SIZE",
-		map = "|_: Vec<u8>| -> Result<(), DekuError> { Ok(()) }"
-	)]
-	_lookup: (), // parsed but discarded (only useful when doing partial parses)
-	#[deku(count = "path_count")]
-	paths: Vec<Path>,
+	pub path_count: usize,
 }
 
-impl DekuWrite<Endian> for PathsEntry {
-	fn write(&self, output: &mut BitVec<Msb0, u8>, ctx: Endian) -> Result<(), DekuError> {
-		write_lookup(&self.paths, output, ctx)
-	}
+#[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
+#[deku(endian = "little")]
+pub struct Lookup {
+	pub index: u32,
+	pub offset: u64,
 }
+pub const LOOKUP_SIZE: usize = size_of::<u32>() + size_of::<u64>();
+static_assertions::const_assert_eq!(LOOKUP_SIZE, 12);
 
 #[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
 #[deku(ctx = "_: Endian")]
 pub struct Attributes {
 	mode: u16,
-}
-
-#[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
-#[deku(endian = "little")]
-pub struct AttributesEntry {
-	#[deku(bytes = 4)]
-	attr_count: usize,
-	#[deku(
-		count = "*attr_count * LOOKUP_SIZE",
-		map = "|_: Vec<u8>| -> Result<(), DekuError> { Ok(()) }"
-	)]
-	_lookup: (), // parsed but discarded (only useful when doing partial parses)
-	#[deku(count = "attr_count")]
-	attrs: Vec<Attributes>,
-}
-
-impl DekuWrite<Endian> for AttributesEntry {
-	fn write(&self, output: &mut BitVec<Msb0, u8>, ctx: Endian) -> Result<(), DekuError> {
-		write_lookup(&self.attrs, output, ctx)
-	}
 }
 
 #[derive(Clone, Copy, Debug, DekuRead, DekuWrite)]
@@ -273,7 +213,7 @@ mod tests {
 	// but actual tomo code is all about reading only what needs to be, not all.
 	#[derive(Clone, Debug, Default, DekuRead, DekuWrite)]
 	#[deku(magic = b"\0T\0M\0v\x01", endian = "little")]
-	pub struct TestContainer {
+	struct TestContainer {
 		mode: Mode,
 		#[deku(
 			update = "{ use crate::parsers::INDIC_SIZE; self.index.len() as u64 * INDIC_SIZE }"
@@ -289,7 +229,7 @@ mod tests {
 
 	#[derive(Clone, Copy, Debug, DekuRead, DekuWrite)]
 	#[deku(ctx = "endian: Endian")]
-	pub struct TestIndic {
+	struct TestIndic {
 		#[deku(ctx = "endian")]
 		kind: IndicKind,
 		#[deku(bytes = 3)]
@@ -302,7 +242,7 @@ mod tests {
 	}
 
 	#[derive(Clone, Debug)]
-	pub struct TestEntry {
+	struct TestEntry {
 		indic: TestIndic,
 		header: EntryHeader,
 		data: Vec<u8>,
@@ -317,17 +257,17 @@ mod tests {
 	}
 
 	#[derive(Clone, Debug, Default)]
-	pub struct TestEntries {
+	struct TestEntries {
 		entries: Vec<TestEntry>,
 		offsets: HashMap<u64, usize>,
 	}
 
 	impl TestEntries {
-		pub fn len(&self) -> usize {
+		fn len(&self) -> usize {
 			self.entries.len()
 		}
 
-		pub fn from_offset(&self, offset: u64) -> Option<&TestEntry> {
+		fn from_offset(&self, offset: u64) -> Option<&TestEntry> {
 			let index = *self.offsets.get(&offset)?;
 			self.entries.get(index)
 		}
@@ -397,6 +337,90 @@ mod tests {
 
 			Ok(())
 		}
+	}
+
+	#[derive(Clone, Copy, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
+	#[deku(ctx = "_: Endian")]
+	struct TestLookup {
+		offset: u64,
+	}
+
+	#[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
+	#[deku(endian = "little")]
+	struct AttributesEntry {
+		#[deku(bytes = 4)]
+		attr_count: usize,
+		#[deku(
+			count = "*attr_count * LOOKUP_SIZE",
+			map = "|_: Vec<u8>| -> Result<(), DekuError> { Ok(()) }"
+		)]
+		_lookup: (), // parsed but discarded (only useful when doing partial parses)
+		#[deku(count = "attr_count")]
+		attrs: Vec<Attributes>,
+	}
+
+	impl DekuWrite<Endian> for AttributesEntry {
+		fn write(&self, output: &mut BitVec<Msb0, u8>, ctx: Endian) -> Result<(), DekuError> {
+			write_lookup(&self.attrs, output, ctx)
+		}
+	}
+
+	fn write_lookup<T: DekuWrite<Endian>>(
+		list: &Vec<T>,
+		output: &mut BitVec<Msb0, u8>,
+		ctx: Endian,
+	) -> Result<(), DekuError> {
+		use std::io::{Cursor, Write};
+
+		let path_count = list.len();
+		(path_count as u32).write(output, ctx)?;
+
+		let lookup_offset = output.len();
+		let lookup_length = path_count * LOOKUP_SIZE;
+		let lookup = vec![0; lookup_length];
+		lookup.write(output, ())?;
+		let mut lookup = Cursor::new(lookup);
+
+		for item in list.iter() {
+			let offset = output.len() as u64;
+			item.write(output, ctx)?;
+
+			// unwrap: infaillible
+			lookup.write(&offset.to_le_bytes()).unwrap();
+		}
+
+		let mut lookup: BitVec<Msb0, u8> = BitVec::try_from_vec(lookup.into_inner()).unwrap();
+		output[lookup_offset..(lookup_offset + lookup_length * 8)].swap_with_bitslice(&mut lookup);
+		Ok(())
+	}
+
+	#[derive(Clone, Debug, DekuRead, Eq, PartialEq, Ord, PartialOrd)]
+	#[deku(endian = "little")]
+	struct PathsEntry {
+		#[deku(bytes = 4)]
+		path_count: usize,
+		#[deku(
+			count = "*path_count * LOOKUP_SIZE",
+			map = "|_: Vec<u8>| -> Result<(), DekuError> { Ok(()) }"
+		)]
+		_lookup: (), // parsed but discarded (only useful when doing partial parses)
+		#[deku(count = "path_count")]
+		paths: Vec<TestPath>,
+	}
+
+	impl DekuWrite<Endian> for PathsEntry {
+		fn write(&self, output: &mut BitVec<Msb0, u8>, ctx: Endian) -> Result<(), DekuError> {
+			write_lookup(&self.paths, output, ctx)
+		}
+	}
+
+	#[derive(Clone, Debug, DekuRead, DekuWrite, Eq, PartialEq, Ord, PartialOrd)]
+	#[deku(ctx = "endian: Endian")]
+	struct TestPath {
+		#[deku(update = "self.segments.len()")]
+		segcount: u32,
+		#[deku(count = "segcount", ctx = "endian")]
+		segments: Vec<PathSeg>,
 	}
 
 	#[test]
@@ -581,7 +605,7 @@ mod tests {
 		assert_eq!(rest.len(), 0, "remaining data on paths entry");
 		assert_eq!(
 			pathsv.paths,
-			vec![Path {
+			vec![TestPath {
 				segcount: 1,
 				segments: vec![PathSeg::Segment(b"hello\0".to_vec())],
 			}]

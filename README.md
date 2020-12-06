@@ -9,7 +9,7 @@ caution._
 Tomo has some interesting properties:
 
  - It's always possible to `cat` two archives together to add one to the other.
- - It's always possible to read or write a single file or subset of files efficiently.
+ - It's always possible to write and often possible to read a single file or subset of files efficiently.
  - It's always possible to read and write archives that are larger than memory.
  - It's always possible to parallelise reading and writing archives.
 

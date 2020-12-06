@@ -70,6 +70,21 @@ impl<'s> SourceState<'s> {
 		}
 	}
 
+	pub(crate) async fn read(&mut self, bytes: u64) -> Result<Vec<u8>, TomoError> {
+		let mut buf = vec![0; bytes as usize];
+		let bytes_read = self.source.read(&mut buf).await? as u64;
+		if bytes_read > bytes {
+			panic!("read more bytes than would fit in buffer, somehow");
+		} else if bytes_read < bytes {
+			return Err(TomoError::UnexpectedEof {
+				expected: bytes,
+				obtained: bytes_read,
+			});
+		}
+
+		Ok(buf)
+	}
+
 	/// Load the next container from this source.
 	///
 	/// Seeks to the end of the last known container on the source (or nowhere if none have been
@@ -122,7 +137,10 @@ impl<'s> SourceState<'s> {
 		})
 	}
 
-	pub(crate) fn index<'src: 's>(&'src mut self, container: usize) -> Option<stream::IndexStream<'src>> {
+	pub(crate) fn index<'src: 's>(
+		&'src mut self,
+		container: usize,
+	) -> Option<stream::IndexStream<'src>> {
 		if container >= self.headers.len() {
 			None
 		} else {
@@ -208,8 +226,29 @@ impl<'s> Tomo<'s> {
 		self.sources.iter().map(|source| source.len()).sum()
 	}
 
-	pub fn paths<'tomo>(&'tomo mut self) -> PathsStream<'tomo, 's> {
+        /// Stream every path in every container.
+        ///
+        /// Reads every [`parsers::Path`] from the Paths entry in every container for every
+        /// source, as a [`Stream`](futures::stream::Stream). Stream order is unspecified.
+        ///
+        /// Also see [`Tomo::indexed_paths`].
+	pub fn all_paths<'tomo>(&'tomo mut self) -> PathsStream<'tomo, 's> {
 		PathsStream::new(self)
+	}
+
+        /// Stream paths corresponding to every indic in every container.
+        ///
+        /// Reads every [`parsers::Indic`] from every index in every container and, for those that
+        /// do have a path, reads that path from the container's Paths entry. Stream order is
+        /// unspecified.
+        ///
+        /// This may return a different amount of paths than [`Tomo::all_paths`] for two reasons:
+        /// 1. paths in the entry that are not referenced in the index (though that's against spec),
+        /// 2. several indics can reference the same path (and this stream does not dedupe).
+        ///
+        /// Also see [`Tomo::all_paths`].
+	pub fn indexed_paths<'tomo>(&'tomo mut self) -> PathsStream<'tomo, 's> {
+		todo!()
 	}
 
 	fn add_source<'slf, T: AsyncRead + AsyncSeek + Unpin>(
@@ -233,6 +272,9 @@ pub enum TomoError {
 
 	#[error("found non-tomo data at offset {offset:}")]
 	NotAContainer { offset: usize },
+
+	#[error("tried to read {expected:} bytes and got {obtained:} bytes (unexpected EOF)")]
+	UnexpectedEof { expected: u64, obtained: u64 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

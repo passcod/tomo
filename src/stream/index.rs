@@ -61,7 +61,7 @@ impl<'src> IndexStream<'src> {
 				return Ok(None);
 			}
 
-			let indic= self.read_indic().await?;
+			let indic = self.read_indic().await?;
 			Ok(Some(indic))
 		}
 		.await;
